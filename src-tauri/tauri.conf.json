@@ -13,8 +13,10 @@
     "windows": [
       {
         "title": "netscope",
-        "width": 800,
-        "height": 600
+        "width": 1100,
+        "height": 750,
+        "decorations": false,
+        "label": "main"
       }
     ],
     "security": {

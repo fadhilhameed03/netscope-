@@ -17,6 +17,12 @@ export interface HostInfo {
   ports: PortInfo[];
 }
 
+export interface VulnInfo {
+  cve_id: string;
+  severity: number | null;
+  summary: string;
+}
+
 export const SCAN_PROFILES = [
   { value: "ping_sweep", label: "Ping Sweep (fast, discovery only)" },
   { value: "quick", label: "Quick Scan (top 100 ports)" },
@@ -28,8 +34,6 @@ export const SCAN_PROFILES = [
   { value: "full_port", label: "Full Port Range (all 65535)" },
 ];
 
-// Mirrors the Rust-side profile_args() mapping — used to populate the
-// editable "Command:" field, Zenmap-style, when a profile is picked.
 export const PROFILE_ARGS: Record<string, string> = {
   ping_sweep: "-sn",
   quick: "-T4 -F",
@@ -40,3 +44,39 @@ export const PROFILE_ARGS: Record<string, string> = {
   os_detect: "-O",
   full_port: "-p- -T4",
 };
+
+export interface ExploitInfo {
+  title: string;
+  edb_id: string;
+  path: string;
+}
+
+export interface NucleiFinding {
+  template_id: string;
+  name: string;
+  severity: string;
+  host: string;
+  matched_at: string;
+  description: string;
+  tags: string[];
+  reference: string[];
+  cve_id: string | null;
+}
+
+// Common nuclei template tags. Selecting none runs nuclei's default set.
+export const NUCLEI_TAGS = [
+  "cves",
+  "vulnerabilities",
+  "exposures",
+  "exposed-panels",
+  "misconfiguration",
+  "default-logins",
+  "takeovers",
+  "network",
+  "dns",
+  "ssl",
+  "technologies",
+  "fuzzing",
+];
+
+export const NUCLEI_SEVERITIES = ["critical", "high", "medium", "low", "info", "unknown"];

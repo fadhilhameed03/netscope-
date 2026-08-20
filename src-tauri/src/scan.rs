@@ -1,9 +1,9 @@
+use roxmltree::{Document, ParsingOptions};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use roxmltree::{Document, ParsingOptions};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -35,20 +35,23 @@ pub struct ScanProgress {
 
 pub fn profile_args(profile: &str) -> Vec<&'static str> {
     match profile {
-        "quick"       => vec!["-T4", "-F"],
-        "intense"     => vec!["-T4", "-A"],
+        "quick" => vec!["-T4", "-F"],
+        "intense" => vec!["-T4", "-A"],
         "stealth_syn" => vec!["-sS", "-T2"],
-        "version"     => vec!["-sV"],
-        "os_detect"   => vec!["-O"],
+        "version" => vec!["-sV"],
+        "os_detect" => vec!["-O"],
         "script_scan" => vec!["-sC", "-sV"],
-        "ping_sweep"  => vec!["-sn"],
-        "full_port"   => vec!["-p-", "-T4"],
-        _             => vec!["-T4", "-F"],
+        "ping_sweep" => vec!["-sn"],
+        "full_port" => vec!["-p-", "-T4"],
+        _ => vec!["-T4", "-F"],
     }
 }
 
 pub fn needs_root(profile: &str) -> bool {
-    matches!(profile, "stealth_syn" | "os_detect" | "intense" | "ping_sweep")
+    matches!(
+        profile,
+        "stealth_syn" | "os_detect" | "intense" | "ping_sweep"
+    )
 }
 
 /// Extra check for when the user has hand-edited the command field:
@@ -74,10 +77,11 @@ pub fn run_nmap(
     custom_args: Option<&str>,
 ) -> Result<String, String> {
     let args: Vec<String> = match custom_args {
-        Some(s) if !s.trim().is_empty() => {
-            s.split_whitespace().map(|x| x.to_string()).collect()
-        }
-        _ => profile_args(profile).into_iter().map(|s| s.to_string()).collect(),
+        Some(s) if !s.trim().is_empty() => s.split_whitespace().map(|x| x.to_string()).collect(),
+        _ => profile_args(profile)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
 
     let use_root = needs_root(profile) || args_need_root(&args);
@@ -101,12 +105,17 @@ pub fn run_nmap(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let _ = app.emit("scan-progress", ScanProgress {
-        message: format!("Launching: nmap {} {}", args.join(" "), target),
-        percent: None,
-    });
+    let _ = app.emit(
+        "scan-progress",
+        ScanProgress {
+            message: format!("Launching: nmap {} {}", args.join(" "), target),
+            percent: None,
+        },
+    );
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to launch nmap: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to launch nmap: {e}"))?;
 
     if let Some(stdout) = child.stdout.take() {
         let app_clone = app.clone();
@@ -117,7 +126,13 @@ pub fn run_nmap(
                     continue;
                 }
                 let percent = extract_percent(&line);
-                let _ = app_clone.emit("scan-progress", ScanProgress { message: line, percent });
+                let _ = app_clone.emit(
+                    "scan-progress",
+                    ScanProgress {
+                        message: line,
+                        percent,
+                    },
+                );
             }
         });
     }
@@ -134,7 +149,9 @@ pub fn run_nmap(
         })
     });
 
-    let status = child.wait().map_err(|e| format!("nmap process error: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("nmap process error: {e}"))?;
     if let Some(h) = stderr_handle {
         let _ = h.join();
     }
@@ -145,19 +162,27 @@ pub fn run_nmap(
         return Err(format!("nmap failed: {err_text}"));
     }
 
-    let _ = app.emit("scan-progress", ScanProgress {
-        message: "Scan finished, parsing results...".into(),
-        percent: Some(100.0),
-    });
+    let _ = app.emit(
+        "scan-progress",
+        ScanProgress {
+            message: "Scan finished, parsing results...".into(),
+            percent: Some(100.0),
+        },
+    );
 
-    let xml = fs::read_to_string(&xml_path).map_err(|e| format!("Couldn't read scan output: {e}"))?;
+    let xml =
+        fs::read_to_string(&xml_path).map_err(|e| format!("Couldn't read scan output: {e}"))?;
     let _ = fs::remove_file(&xml_path);
     Ok(xml)
 }
 
 pub fn parse_nmap_xml(xml: &str) -> Result<Vec<HostInfo>, String> {
-    let opts = ParsingOptions { allow_dtd: true, ..Default::default() };
-    let doc = Document::parse_with_options(xml, opts).map_err(|e| format!("XML parse error: {e}"))?;
+    let opts = ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc =
+        Document::parse_with_options(xml, opts).map_err(|e| format!("XML parse error: {e}"))?;
     let mut hosts = Vec::new();
 
     for host_node in doc.descendants().filter(|n| n.has_tag_name("host")) {
@@ -173,7 +198,9 @@ pub fn parse_nmap_xml(xml: &str) -> Result<Vec<HostInfo>, String> {
         let mut vendor = String::new();
         for addr in host_node.children().filter(|n| n.has_tag_name("address")) {
             match addr.attribute("addrtype") {
-                Some("ipv4") | Some("ipv6") => ip = addr.attribute("addr").unwrap_or("").to_string(),
+                Some("ipv4") | Some("ipv6") => {
+                    ip = addr.attribute("addr").unwrap_or("").to_string()
+                }
                 Some("mac") => {
                     mac = addr.attribute("addr").unwrap_or("").to_string();
                     vendor = addr.attribute("vendor").unwrap_or("").to_string();
@@ -201,7 +228,11 @@ pub fn parse_nmap_xml(xml: &str) -> Result<Vec<HostInfo>, String> {
         let mut ports = Vec::new();
         if let Some(ports_node) = host_node.children().find(|n| n.has_tag_name("ports")) {
             for port_node in ports_node.children().filter(|n| n.has_tag_name("port")) {
-                let port_num: u16 = port_node.attribute("portid").unwrap_or("0").parse().unwrap_or(0);
+                let port_num: u16 = port_node
+                    .attribute("portid")
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
                 let protocol = port_node.attribute("protocol").unwrap_or("").to_string();
                 let port_state = port_node
                     .children()
@@ -210,15 +241,39 @@ pub fn parse_nmap_xml(xml: &str) -> Result<Vec<HostInfo>, String> {
                     .unwrap_or("unknown")
                     .to_string();
                 let service_node = port_node.children().find(|n| n.has_tag_name("service"));
-                let service = service_node.and_then(|n| n.attribute("name")).unwrap_or("").to_string();
-                let product = service_node.and_then(|n| n.attribute("product")).unwrap_or("").to_string();
-                let version = service_node.and_then(|n| n.attribute("version")).unwrap_or("").to_string();
-                ports.push(PortInfo { port: port_num, protocol, state: port_state, service, product, version });
+                let service = service_node
+                    .and_then(|n| n.attribute("name"))
+                    .unwrap_or("")
+                    .to_string();
+                let product = service_node
+                    .and_then(|n| n.attribute("product"))
+                    .unwrap_or("")
+                    .to_string();
+                let version = service_node
+                    .and_then(|n| n.attribute("version"))
+                    .unwrap_or("")
+                    .to_string();
+                ports.push(PortInfo {
+                    port: port_num,
+                    protocol,
+                    state: port_state,
+                    service,
+                    product,
+                    version,
+                });
             }
         }
 
         if !ip.is_empty() {
-            hosts.push(HostInfo { ip, hostname, state, os, mac, vendor, ports });
+            hosts.push(HostInfo {
+                ip,
+                hostname,
+                state,
+                os,
+                mac,
+                vendor,
+                ports,
+            });
         }
     }
 

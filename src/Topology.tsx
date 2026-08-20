@@ -10,22 +10,23 @@ interface Props {
   onSelectHost: (ip: string | null) => void;
 }
 
-function classifyHost(host: HostInfo): { color: string } {
+function classifyHost(host: HostInfo): { color: string; icon: string } {
   const services = host.ports.map((p) => p.service.toLowerCase());
-  if (services.some((s) => s.includes("http"))) return { color: "#2e7d5b" };
-  if (services.some((s) => s.includes("print") || s.includes("ipp"))) return { color: "#8b2f2f" };
-  if (services.some((s) => s.includes("ssh"))) return { color: "#2e7d5b" };
-  if (host.os.toLowerCase().includes("router") || host.os.toLowerCase().includes("cisco"))
-    return { color: "#2e7d5b" };
-  if (host.ports.length === 0) return { color: "#2e6d7d" };
-  return { color: "#2e7d5b" };
+  const hostnameLower = host.hostname.toLowerCase();
+  const lastOctet = host.ip.split(".").pop();
+
+  if (hostnameLower.includes("gateway") || lastOctet === "1") return { color: "#c9a227", icon: "📡" };
+  if (services.some((s) => s.includes("http"))) return { color: "#2e7d5b", icon: "🌐" };
+  if (services.some((s) => s.includes("print") || s.includes("ipp"))) return { color: "#8b2f2f", icon: "🖨" };
+  if (services.some((s) => s.includes("ssh"))) return { color: "#5a7dc9", icon: "💻" };
+  if (host.ports.length === 0) return { color: "#2e6d7d", icon: "❔" };
+  return { color: "#2e7d5b", icon: "🖥" };
 }
 
 export default function Topology({ hosts, selectedIp, onSelectHost }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const networkRef = useRef<Network | null>(null);
 
-  // Build (or rebuild) the graph whenever the host list changes.
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -40,25 +41,29 @@ export default function Topology({ hosts, selectedIp, onSelectHost }: Props) {
       const nodes = new DataSet<any>([
         {
           id: "scanner",
-          label: "Scanner\n(you)",
+          label: "🛰️\nScanner (you)",
           shape: "dot",
-          color: { background: "#c9a227", border: "#e0c34e" },
-          font: { color: "#fff", size: 14 },
-          size: 26,
+          color: { background: "#c9a227", border: "#ffffff33" },
+          font: { color: "#fff", size: 13 },
+          size: 32,
+          shadow: { enabled: true, color: "#c9a22799", size: 20, x: 0, y: 0 },
         },
         ...uniqueHosts.map((h) => {
           const { color } = classifyHost(h);
+          const nameLine = h.hostname ? `${h.hostname}\n${h.ip}` : h.ip;
           return {
             id: h.ip,
-            label: `${h.hostname || h.ip}\n${h.ip}`,
+            label: nameLine,
             shape: "dot",
             color: {
               background: color,
-              border: "#3fae7a",
+              border: "#ffffffaa",
               highlight: { background: color, border: "#7fffb0" },
             },
-            font: { color: "#fff", size: 12 },
-            size: 22,
+            font: { color: "#e8f5ee", size: 12 },
+            size: 26,
+            borderWidth: 3,
+            shadow: { enabled: true, color: color + "aa", size: 16, x: 0, y: 0 },
           };
         }),
       ]);
@@ -92,13 +97,10 @@ export default function Topology({ hosts, selectedIp, onSelectHost }: Props) {
         network.setOptions({ physics: { enabled: false } });
       });
 
-      // Belt-and-suspenders: force physics off shortly after mount even if the
-      // stabilization event fires oddly (can happen with very small graphs).
-      setTimeout(() => {
+      const physicsOffTimer = setTimeout(() => {
         network.setOptions({ physics: { enabled: false } });
       }, 800);
 
-      // Click a node to select that host; click empty space to deselect.
       network.on("click", (params) => {
         if (params.nodes.length > 0) {
           const id = params.nodes[0];
@@ -111,6 +113,7 @@ export default function Topology({ hosts, selectedIp, onSelectHost }: Props) {
       networkRef.current = network;
 
       return () => {
+        clearTimeout(physicsOffTimer);
         network.destroy();
         networkRef.current = null;
       };
@@ -122,7 +125,6 @@ export default function Topology({ hosts, selectedIp, onSelectHost }: Props) {
     }
   }, [hosts]);
 
-  // Keep the graph's own selection in sync when selection changes elsewhere (e.g. clicking the list).
   useEffect(() => {
     if (!networkRef.current) return;
     if (selectedIp) {
