@@ -22,7 +22,15 @@ const TOP_LEVEL = [
 
 const CATEGORIES: NavCategory[] = [
   { id: "recon", label: "Recon", icon: "◎", count: 0, items: [] },
-  { id: "web", label: "Web", icon: "⌁", count: 0, items: [] },
+  {
+    id: "web",
+    label: "Web",
+    icon: "⌁",
+    count: 1,
+    items: [
+      { id: "browser", label: "Browser", enabled: true },
+    ],
+  },
   {
     id: "vulnerabilities",
     label: "Vulnerabilities",
@@ -36,7 +44,7 @@ const CATEGORIES: NavCategory[] = [
     id: "network",
     label: "Network",
     icon: "⚡",
-    count: 1,
+    count: 2,
     items: [
       { id: "port-scanner", label: "Port Scanner", enabled: true },
       { id: "ettercap", label: "Ettercap", enabled: true },
@@ -53,7 +61,7 @@ interface Props {
 }
 
 export default function Sidebar({ activePage, onSelectPage }: Props) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({ network: true, vulnerabilities: true });
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({ network: true, vulnerabilities: true, web: true });
   const [search, setSearch] = useState("");
 
   function toggleCategory(id: string) {

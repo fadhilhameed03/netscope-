@@ -12,10 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "netscope",
+        "title": "",
         "width": 1100,
         "height": 750,
-        "decorations": false,
+        "decorations": true,
+        "resizable": true,
         "label": "main"
       }
     ],

@@ -3,6 +3,8 @@ mod vuln;
 mod exploit;
 mod ettercap;
 mod nuclei;
+#[cfg(target_os = "linux")]
+mod native_browser;
 use scan::{parse_nmap_xml, run_nmap, HostInfo};
 use vuln::{lookup_vulns, VulnInfo};
 use exploit::{search_exploits, ExploitInfo};
@@ -12,6 +14,81 @@ use std::collections::HashMap;
 use std::process::Child;
 use std::sync::Mutex;
 use tauri::Emitter;
+use reqwest;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PageInfo {
+    pub url: String,
+    pub final_url: String,
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub title: Option<String>,
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    pub server: Option<String>,
+}
+
+#[tauri::command]
+async fn fetch_page_info(url: String) -> Result<PageInfo, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36")
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+
+    let final_url = resp.url().to_string();
+    let status = resp.status().as_u16();
+
+    let headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+        .collect();
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let content_length = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let server = resp
+        .headers()
+        .get("server")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = resp.text().await.unwrap_or_default();
+
+    let title = {
+        let lower = body.to_lowercase();
+        let start = lower.find("<title>").map(|i| i + 7);
+        let end = lower.find("</title>");
+        match (start, end) {
+            (Some(s), Some(e)) if s < e => Some(body[s..e].trim().to_string()),
+            _ => None,
+        }
+    };
+
+    Ok(PageInfo {
+        url,
+        final_url,
+        status,
+        headers,
+        title,
+        content_type,
+        content_length,
+        server,
+    })
+}
 
 /// Holds the currently running ettercap MITM process, if any.
 /// Only one MITM session is allowed at a time.
@@ -92,7 +169,6 @@ async fn check_vulnerabilities(
 }
 
 /// Runs a local searchsploit lookup for a given product/version string.
-/// Fast and offline — no rate limiting needed like NVD.
 #[tauri::command]
 async fn search_exploit_db(query: String) -> Result<Vec<ExploitInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || search_exploits(&query))
@@ -100,8 +176,6 @@ async fn search_exploit_db(query: String) -> Result<Vec<ExploitInfo>, String> {
         .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Ettercap host discovery (Step 1): scans `iface` for `duration_secs` seconds,
-/// no MITM performed, returns the discovered host list.
 #[tauri::command]
 async fn ettercap_discover_hosts(
     app: tauri::AppHandle,
@@ -113,9 +187,6 @@ async fn ettercap_discover_hosts(
         .map_err(|e| format!("Task join error: {e}"))?
 }
 
-/// Ettercap MITM (Step 2): starts an ARP MITM session against the selected
-/// target IPs. Refuses to start a second session while one is already running,
-/// unless the previously stored process has already exited on its own.
 #[tauri::command]
 async fn ettercap_start_mitm(
     app: tauri::AppHandle,
@@ -128,18 +199,12 @@ async fn ettercap_start_mitm(
         let mut guard = state.0.lock().unwrap();
         if let Some(child) = guard.as_mut() {
             match child.try_wait() {
-                // Process already exited on its own (crash, bad args, killed
-                // externally, etc.) — the stored handle is stale, clear it
-                // and let the new session start.
                 Ok(Some(_)) => {
                     *guard = None;
                 }
-                // Still genuinely running — refuse.
                 Ok(None) => {
                     return Err("A MITM session is already running. Stop it first.".to_string());
                 }
-                // Couldn't determine status — treat as stale rather than
-                // permanently locking the user out.
                 Err(_) => {
                     *guard = None;
                 }
@@ -158,7 +223,6 @@ async fn ettercap_start_mitm(
     Ok(())
 }
 
-/// Stops the currently running MITM session, if any.
 #[tauri::command]
 fn ettercap_stop_mitm(state: tauri::State<'_, MitmState>) -> Result<(), String> {
     let mut guard = state.0.lock().unwrap();
@@ -169,9 +233,6 @@ fn ettercap_stop_mitm(state: tauri::State<'_, MitmState>) -> Result<(), String> 
     }
 }
 
-/// Runs a nuclei scan against `target`, optionally scoped by comma-separated
-/// template tags. Streams findings live via "nuclei-finding" events and
-/// returns the full collected list once the scan completes.
 #[tauri::command]
 async fn nuclei_scan(
     app: tauri::AppHandle,
@@ -181,6 +242,119 @@ async fn nuclei_scan(
     tauri::async_runtime::spawn_blocking(move || run_nuclei(&app, &target, tags.as_deref()))
         .await
         .map_err(|e| format!("Task join error: {e}"))?
+}
+
+// ── Native embedded browser commands ──────────────────────────────────
+// Real implementations on Linux (see native_browser.rs); harmless stub
+// errors elsewhere so the frontend's invoke() surface stays the same
+// across platforms without special-casing.
+
+#[tauri::command]
+async fn native_browser_navigate(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            native_browser::navigate(window, app, url, x, y, width, height)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (window, app, url, x, y, width, height);
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn native_browser_set_bounds(
+    window: tauri::WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            native_browser::set_bounds(window, x, y, width, height)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (window, x, y, width, height);
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn native_browser_set_visible(window: tauri::WebviewWindow, visible: bool) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || native_browser::set_visible(window, visible))
+            .await
+            .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (window, visible);
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn native_browser_go_back(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || native_browser::go_back(window))
+            .await
+            .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn native_browser_go_forward(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || native_browser::go_forward(window))
+            .await
+            .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn native_browser_refresh(window: tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        tauri::async_runtime::spawn_blocking(move || native_browser::refresh(window))
+            .await
+            .map_err(|e| format!("Task join error: {e}"))?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err("Native embedded browser is only implemented for Linux.".to_string())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -198,7 +372,14 @@ pub fn run() {
             ettercap_discover_hosts,
             ettercap_start_mitm,
             ettercap_stop_mitm,
-            nuclei_scan
+            nuclei_scan,
+            fetch_page_info,
+            native_browser_navigate,
+            native_browser_set_bounds,
+            native_browser_set_visible,
+            native_browser_go_back,
+            native_browser_go_forward,
+            native_browser_refresh
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
