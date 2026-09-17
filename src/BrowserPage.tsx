@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Webview, getAllWebviews } from "@tauri-apps/api/webview";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 // ── types ──────────────────────────────────────────────────────────────
 interface PageInfo {
@@ -12,14 +14,6 @@ interface PageInfo {
   content_type: string | null;
   content_length: number | null;
   server: string | null;
-}
-
-interface NativeBrowserState {
-  url: string;
-  title: string | null;
-  loading: boolean;
-  can_go_back: boolean;
-  can_go_forward: boolean;
 }
 
 interface Props {
@@ -42,32 +36,36 @@ function statusColor(code: number): string {
   return "#ef5350";
 }
 
+// Module-level webview ref — persists across re-renders
+let _wv: Webview | null = null;
+let _wvCounter = 0;
+
 // ── component ──────────────────────────────────────────────────────────
-// Drives a real WebKitWebView positioned via gtk::Fixed in the Rust
-// backend (see native_browser.rs) instead of Tauri's own JS multiwebview
-// API — that API places child webviews in a plain gtk::Box, which has no
-// absolute-positioning support at all, hence the persistent mispositioning
-// bug. Talking to GTK directly gives genuine pixel-accurate placement plus
-// real back/forward/reload since we drive WebKit ourselves.
+// Uses Tauri's JS-level child Webview API (setPosition/setSize/show/hide).
+// This is known-broken on Linux/GTK (child webviews live in a plain gtk::Box
+// with no absolute-positioning support, plus an unrelated GTK-only crash in
+// tauri-runtime-wry's resize hit-testing when any extra widget is present in
+// the window tree — see native_browser.rs for the Linux-specific
+// raw-GTK workaround). On macOS, child webviews are NSViews positioned by
+// real frame coordinates, so neither issue applies and this should work
+// as expected out of the box.
 export default function BrowserPage({ visible }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [urlInput, setUrlInput] = useState("https://www.google.com");
   const [currentUrl, setCurrentUrl] = useState("");
-  const [pageTitle, setPageTitle] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [canGoForward, setCanGoForward] = useState(false);
-  const [browserError, setBrowserError] = useState<string | null>(null);
-  const [initialized, setInitialized] = useState(false);
+  const [wvReady, setWvReady] = useState(false);
+  const [wvError, setWvError] = useState<string | null>(null);
 
-  // Inspect overlay (hides the native webview while open — see note in
-  // navigate/visibility effects below on why it can't share space inline)
+  // Inspect overlay — hides the webview while open, avoiding any need to
+  // share space with it inline.
   const [inspectOpen, setInspectOpen] = useState(false);
   const [inspectTab, setInspectTab] = useState<"headers" | "info" | "cookies">("headers");
   const [pageInfo, setPageInfo] = useState<PageInfo | null>(null);
   const [infoLoading, setInfoLoading] = useState(false);
   const [infoError, setInfoError] = useState<string | null>(null);
 
+  // ── webview helpers ────────────────────────────────────────────────
   const getViewportRect = useCallback(() => {
     if (!viewportRef.current) return null;
     const rect = viewportRef.current.getBoundingClientRect();
@@ -75,89 +73,135 @@ export default function BrowserPage({ visible }: Props) {
     return rect;
   }, []);
 
-  const syncBounds = useCallback(() => {
+  const syncWebviewBounds = useCallback((attempt = 0) => {
+    if (!_wv) return;
     const rect = getViewportRect();
     if (!rect) return;
-    invoke("native_browser_set_bounds", {
-      x: rect.x,
-      y: rect.y,
-      width: rect.width,
-      height: rect.height,
-    }).catch(() => { });
+    const wvSnap = _wv;
+    const size = new LogicalSize(Math.round(rect.width), Math.round(rect.height));
+    const pos = new LogicalPosition(Math.round(rect.x), Math.round(rect.y));
+    Promise.all([wvSnap.setSize(size), wvSnap.setPosition(pos)]).catch(() => {
+      if (attempt < 20 && wvSnap === _wv) {
+        setTimeout(() => syncWebviewBounds(attempt + 1), 100);
+      }
+    });
   }, [getViewportRect]);
+
+  const destroyWebview = useCallback(async () => {
+    if (_wv) {
+      try { await _wv.close(); } catch { /* already gone */ }
+      _wv = null;
+      setWvReady(false);
+    }
+  }, []);
+
+  const createWebview = useCallback(async (url: string) => {
+    const rect = getViewportRect();
+    if (!rect) return;
+
+    await destroyWebview();
+
+    _wvCounter += 1;
+    const label = `browser_${_wvCounter}`;
+
+    try {
+      const win = getCurrentWindow();
+      _wv = new Webview(win, label, {
+        url,
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+      setWvReady(true);
+      setWvError(null);
+      setCurrentUrl(url);
+      setUrlInput(url);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => syncWebviewBounds());
+      });
+    } catch (e) {
+      setWvError(`Failed to embed browser: ${String(e)}`);
+    }
+  }, [getViewportRect, destroyWebview, syncWebviewBounds]);
 
   const navigate = useCallback(async (rawUrl: string) => {
     const url = normalizeUrl(rawUrl);
     if (!url || url === "about:blank") return;
-    const rect = getViewportRect();
-    if (!rect) return;
     setLoading(true);
-    setBrowserError(null);
+    setWvError(null);
     try {
-      await invoke("native_browser_navigate", {
-        url,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      });
-      setCurrentUrl(url);
-      setUrlInput(url);
-      setInitialized(true);
+      await createWebview(url);
     } catch (e) {
-      setBrowserError(String(e));
+      setWvError(`Navigation error: ${String(e)}`);
+    } finally {
       setLoading(false);
     }
-  }, [getViewportRect]);
+  }, [createWebview]);
 
-  // Listen for real WebKit navigation state (loading, title, back/forward
-  // availability) pushed from the Rust side.
+  // ── lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
-    const unlisten = listen<NativeBrowserState>("native-browser-state", (event) => {
-      const s = event.payload;
-      setLoading(s.loading);
-      setPageTitle(s.title);
-      setCanGoBack(s.can_go_back);
-      setCanGoForward(s.can_go_forward);
-      if (s.url) {
-        setCurrentUrl(s.url);
-        setUrlInput(s.url);
-      }
-    });
-    return () => { unlisten.then((f) => f()); };
+    getAllWebviews()
+      .then((all) => {
+        for (const wv of all) {
+          if (wv.label.startsWith("browser_") && wv.label !== _wv?.label) {
+            wv.close().catch(() => { });
+          }
+        }
+      })
+      .catch(() => { });
   }, []);
 
-  // Create lazily the first time the page is actually visible — creating
-  // while hidden measures a 0×0 rect and bakes in bad bounds.
   useEffect(() => {
-    if (!visible || initialized) return;
-    navigate("https://www.google.com");
-  }, [visible, initialized, navigate]);
+    if (!visible || _wv) return;
+    createWebview("https://www.google.com");
+  }, [visible, createWebview]);
 
-  // Show/hide (and resync bounds on show) whenever visibility or the
-  // Inspect overlay toggles.
   useEffect(() => {
-    if (!initialized) return;
-    const shouldShow = visible && !inspectOpen;
-    invoke("native_browser_set_visible", { visible: shouldShow }).catch(() => { });
-    if (shouldShow) syncBounds();
-  }, [visible, inspectOpen, initialized, syncBounds]);
+    if (!_wv) return;
+    if (!visible || inspectOpen) {
+      const hideWithRetry = (attempt = 0) => {
+        if (!_wv) return;
+        _wv.hide().catch(() => {
+          if (attempt < 20) setTimeout(() => hideWithRetry(attempt + 1), 100);
+        });
+      };
+      hideWithRetry();
+      return;
+    }
+    const wvSnap = _wv;
+    let cancelled = false;
+    const tryShow = async (attempt: number) => {
+      if (cancelled || wvSnap !== _wv) return;
+      try {
+        await wvSnap.show();
+        if (!cancelled) syncWebviewBounds();
+      } catch {
+        if (attempt < 20 && !cancelled) setTimeout(() => tryShow(attempt + 1), 100);
+      }
+    };
+    tryShow(0);
+    return () => { cancelled = true; };
+  }, [visible, inspectOpen, syncWebviewBounds, wvReady]);
 
-  // Continuously track the viewport div's actual box.
   useEffect(() => {
     if (!viewportRef.current || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (visible && !inspectOpen) syncBounds();
+      if (visible && !inspectOpen) syncWebviewBounds();
     });
     observer.observe(viewportRef.current);
     return () => observer.disconnect();
-  }, [visible, inspectOpen, syncBounds]);
+  }, [visible, inspectOpen, syncWebviewBounds]);
 
   useEffect(() => {
-    const onResize = () => { if (visible && !inspectOpen) syncBounds(); };
+    const onResize = () => { if (visible && !inspectOpen) syncWebviewBounds(); };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [visible, inspectOpen, syncBounds]);
+  }, [visible, inspectOpen, syncWebviewBounds]);
+
+  useEffect(() => {
+    return () => { destroyWebview(); };
+  }, [destroyWebview]);
 
   // ── handlers ───────────────────────────────────────────────────────
   function handleSubmit(e: React.FormEvent) {
@@ -165,16 +209,8 @@ export default function BrowserPage({ visible }: Props) {
     navigate(urlInput);
   }
 
-  function handleBack() {
-    invoke("native_browser_go_back").catch(() => { });
-  }
-
-  function handleForward() {
-    invoke("native_browser_go_forward").catch(() => { });
-  }
-
   function handleRefresh() {
-    invoke("native_browser_refresh").catch(() => { });
+    if (currentUrl) navigate(currentUrl);
   }
 
   async function handleInspectToggle() {
@@ -203,11 +239,10 @@ export default function BrowserPage({ visible }: Props) {
 
   return (
     <div className="bp-root">
-      {/* ── Address bar ── */}
       <div className="bp-chrome">
-        <button className="bp-nav-btn" title="Back" onClick={handleBack} disabled={!canGoBack}>‹</button>
-        <button className="bp-nav-btn" title="Forward" onClick={handleForward} disabled={!canGoForward}>›</button>
-        <button className="bp-nav-btn" title="Refresh" onClick={handleRefresh} disabled={!initialized || loading}>↺</button>
+        <button className="bp-nav-btn" title="Back/forward not supported" disabled>‹</button>
+        <button className="bp-nav-btn" title="Forward not supported" disabled>›</button>
+        <button className="bp-nav-btn" title="Refresh" onClick={handleRefresh} disabled={!wvReady || loading}>↺</button>
 
         <form className="bp-url-form" onSubmit={handleSubmit}>
           <div className="bp-url-bar">
@@ -222,7 +257,6 @@ export default function BrowserPage({ visible }: Props) {
               autoCorrect="off"
               autoCapitalize="off"
               placeholder="Enter URL or search..."
-              title={pageTitle ?? undefined}
             />
             <button type="submit" className="bp-go-btn" disabled={loading}>Go</button>
           </div>
@@ -238,11 +272,10 @@ export default function BrowserPage({ visible }: Props) {
         </button>
       </div>
 
-      {browserError && <div className="bp-error-bar">⚠ {browserError}</div>}
+      {wvError && <div className="bp-error-bar">⚠ {wvError}</div>}
 
-      {/* ── Viewport — native webview overlays this div when Inspect is closed ── */}
       <div className="bp-viewport" ref={viewportRef}>
-        {!initialized && !browserError && !inspectOpen && (
+        {!wvReady && !wvError && !inspectOpen && (
           <div className="bp-splash">
             <span className="bp-loading-ring" />
             <span>Initialising browser…</span>
